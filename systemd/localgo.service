@@ -1,0 +1,14 @@
+[Unit]
+Description=LocalGo LocalSend receiver (headless, IPC enabled)
+Documentation=https://github.com/bethropolis/localgo
+After=network.target
+
+[Service]
+Type=simple
+# Installed by install.sh - edit the paths here if you move things around.
+ExecStart=@LOCALGO@ serve --ipc --quiet --dir @DOWNLOAD_DIR@
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target
