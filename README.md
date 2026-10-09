@@ -15,7 +15,7 @@ matches its colours, typography, spacing, radii and animations.
 
 ## Features
 
-- **Nearby devices** — name, type icon, model/IP and Online/Offline state; select a target by clicking it.
+- **Nearby devices** — name, type icon, model/IP and a freshness state; select a target by clicking it. A device is shown **Online** only if `localgo` heard from it in the last 5 minutes, otherwise it shows its last-seen age (e.g. *Seen 1h ago*) so a stale cache entry can't masquerade as reachable.
 - **Scan / Refresh** — event-driven by default; a manual scan runs `localgo discover` and *merges* the result with the daemon's device cache (a scan that finds nothing never clears the list).
 - **Send files** — multi-select picker (`zenity`).
 - **Send folder** — sent as a `.zip` (`localgo` compresses it).
