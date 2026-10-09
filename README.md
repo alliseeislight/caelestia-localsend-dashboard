@@ -33,7 +33,7 @@ matches its colours, typography, spacing, radii and animations.
 
 | Dependency | Why | Notes |
 |---|---|---|
-| [Caelestia](https://github.com/caelestia-dots/shell) | the shell being extended | config at `~/.config/quickshell/caelestia` |
+| [Caelestia](https://github.com/caelestia-dots/shell) | the shell being extended | per-user copy at `~/.config/quickshell/caelestia`, or a system install such as `/etc/xdg/quickshell/caelestia` (AUR). `install.sh` detects both |
 | [localgo](https://github.com/bethropolis/localgo) ≥ 0.6.7 | headless LocalSend protocol + IPC | installed automatically by `install.sh` |
 | `zenity` | multi-file / folder pickers | `sudo pacman -S zenity` |
 | `systemd` (user) | runs the receiver in the background | needed for receiving without a GUI |
@@ -58,13 +58,39 @@ The installer is idempotent and makes timestamped backups of anything it touches
 
 ### What the installer does, step by step
 
-1. **Preflight** — checks that Caelestia, `systemd`, `curl`, `tar` and `python3` are present and warns if `zenity` is missing.
+1. **Preflight** — locates the Caelestia shell config (see [Where Caelestia lives](#where-caelestia-lives)) and checks that `systemd`, `curl`, `tar` and `python3` are present, warning if `zenity` is missing.
 2. **Installs `localgo`** (if not already on your `PATH` or at `~/.local/bin/localgo`) by downloading the correct Linux release, verifying its SHA-256 checksum, and installing the binary to `~/.local/bin/localgo`.
 3. **Installs the receiver service** — writes `~/.config/systemd/user/localgo.service`, then `systemctl --user enable --now localgo.service`. It listens on port `53317` and exposes a control socket at `~/.cache/localgo/ipc.sock`.
 4. **Installs the widget** — copies `LocalSend.qml` → `~/.config/quickshell/caelestia/services/` and `LocalSendTab.qml` → `~/.config/quickshell/caelestia/modules/dashboard/`.
 5. **Wires the tab in** — safely patches `modules/dashboard/Content.qml` to add a **LocalSend** tab (with a timestamped backup).
 6. **Avoids the port clash** — if a LocalSend GUI autostart entry exists, it is renamed to `.disabled` (backup kept).
 7. **Reloads the shell** — `qs -c caelestia kill; qs -c caelestia -d`.
+
+### Where Caelestia lives
+
+Quickshell resolves `qs -c caelestia` by checking the `quickshell` folder of
+`$XDG_CONFIG_HOME` and then each directory in `$XDG_CONFIG_DIRS` (default
+`/etc/xdg`), using the **first** one that contains a `shell.qml`. So Caelestia
+can be in any of:
+
+| Location | Typical source | Writable by you? |
+|---|---|---|
+| `~/.config/quickshell/caelestia` | git clone / manual | yes |
+| `/etc/xdg/quickshell/caelestia` | `caelestia-shell` AUR package | no (root) |
+| `<other XDG_CONFIG_DIRS>/quickshell/caelestia` | custom install | maybe |
+
+`install.sh` finds whichever copy Quickshell would load:
+
+* If that's your `~/.config` copy, the tab is wired straight into it.
+* If it's a root-owned **system** copy (AUR package), the installer cannot edit
+  it, so it copies the whole shell to `~/.config/quickshell/caelestia` — which
+  Quickshell then prefers — and wires the tab into that copy. Any pre-existing
+  user folder is backed up first, and re-runs leave the copy alone.
+
+> **Note:** once a personal copy exists it shadows the packaged shell, so
+> `caelestia-shell` package updates won't be applied automatically. Delete
+> `~/.config/quickshell/caelestia` and re-run the installer to start from the
+> packaged copy again.
 
 ### Manual installation
 
@@ -83,16 +109,21 @@ cp systemd/localgo.service ~/.config/systemd/user/localgo.service
 systemctl --user daemon-reload
 systemctl --user enable --now localgo.service
 
-# 3. the widget files
+# 3. ensure you have a per-user copy of the shell (Quickshell prefers it).
+#    The caelestia-shell AUR package keeps its copy in /etc/xdg (root-owned):
+[ -f ~/.config/quickshell/caelestia/shell.qml ] || \
+  cp -a /etc/xdg/quickshell/caelestia ~/.config/quickshell/caelestia
+
+# 4. the widget files
 mkdir -p ~/.config/quickshell/caelestia/services \
          ~/.config/quickshell/caelestia/modules/dashboard
 cp config/services/LocalSend.qml                 ~/.config/quickshell/caelestia/services/
 cp config/modules/dashboard/LocalSendTab.qml     ~/.config/quickshell/caelestia/modules/dashboard/
 
-# 4. add the tab to Content.qml
+# 5. add the tab to Content.qml
 python3 scripts/patch-content.py ~/.config/quickshell/caelestia/modules/dashboard/Content.qml
 
-# 5. reload
+# 6. reload
 qs -c caelestia kill; sleep 0.1; qs -c caelestia -d
 ```
 
@@ -179,6 +210,11 @@ other end it was declined, or the accept window (~30 s) expired.
 ./uninstall.sh            # removes the widget + service, restores Content.qml
 ./uninstall.sh --purge    # also deletes ~/.local/bin/localgo and its cached data
 ```
+
+If `install.sh` had to create a personal shell copy (system-wide/AUR install),
+that copy is left in place so nothing else of yours is lost — the uninstaller
+prints a reminder and how to remove it if you want to fall back to the packaged
+shell.
 
 Or manually:
 

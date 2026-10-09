@@ -10,6 +10,7 @@ set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}"
+# Resolved by the preflight below (Caelestia may be installed system-wide).
 QS_CONFIG="$CONFIG_HOME/quickshell/caelestia"
 BIN_DIR="$HOME/.local/bin"
 SYSTEMD_USER_DIR="$CONFIG_HOME/systemd/user"
@@ -33,8 +34,49 @@ have() { command -v "$1" >/dev/null 2>&1; }
 
 # ── 1. preflight ────────────────────────────────────────────────────────────
 info "Preflight checks"
-[ -d "$QS_CONFIG" ] || die "Caelestia config not found at $QS_CONFIG. Install Caelestia first."
-[ -f "$QS_CONFIG/modules/dashboard/Content.qml" ] || die "Caelestia dashboard (Content.qml) not found."
+
+# shellcheck source=scripts/lib.sh
+source "$REPO_DIR/scripts/lib.sh"
+
+# Caelestia can live in a few places; find the one Quickshell will actually load.
+USER_CAELESTIA="$CONFIG_HOME/quickshell/caelestia"
+if ! ACTIVE_CAELESTIA="$(caelestia_active)"; then
+    {
+        printf '%s\n' "Caelestia shell config not found. Looked in:"
+        while IFS= read -r cand; do printf '  - %s\n' "$cand"; done < <(caelestia_candidates)
+    } >&2
+    die "Install Caelestia first — the caelestia-shell package or a git clone of caelestia-dots/shell."
+fi
+
+# Resolve symlinks up front so we never copy, or later edit, a symlink that
+# points back into a root-owned location.
+QS_CONFIG="$(readlink -f "$ACTIVE_CAELESTIA" 2>/dev/null || printf '%s' "$ACTIVE_CAELESTIA")"
+USER_CAELESTIA="$(readlink -f "$USER_CAELESTIA" 2>/dev/null || printf '%s' "$CONFIG_HOME/quickshell/caelestia")"
+
+# The caelestia-shell package installs to /etc/xdg/quickshell/caelestia, which
+# is root-owned, so the tab cannot be wired into it. Quickshell prefers a
+# per-user copy, so make one and patch that instead of touching system files.
+if [ "$QS_CONFIG" != "$USER_CAELESTIA" ] && [ ! -f "$USER_CAELESTIA/shell.qml" ]; then
+    info "Found Caelestia installed outside your home: $QS_CONFIG"
+    warn "That location isn't yours to modify, so a personal copy will be used."
+    if [ -e "$USER_CAELESTIA" ]; then
+        cp -a "$USER_CAELESTIA" "$USER_CAELESTIA.bak.$STAMP"
+        ok "Backed up existing $USER_CAELESTIA → $USER_CAELESTIA.bak.$STAMP"
+        rm -rf "$USER_CAELESTIA"
+    fi
+    info "Copying the Caelestia shell → $USER_CAELESTIA"
+    mkdir -p "$(dirname "$USER_CAELESTIA")"
+    if ! cp -a "$QS_CONFIG" "$USER_CAELESTIA"; then
+        die "Could not copy $QS_CONFIG to $USER_CAELESTIA (check permissions and free disk space)."
+    fi
+    QS_CONFIG="$USER_CAELESTIA"
+    : > "$USER_CAELESTIA/.caelestia-localsend-copy"
+    ok "Quickshell will now use $USER_CAELESTIA"
+    warn "Your personal copy will not receive caelestia-shell package updates."
+    warn "Delete it and re-run the installer to fall back to the packaged copy."
+fi
+
+[ -f "$QS_CONFIG/modules/dashboard/Content.qml" ] || die "Caelestia dashboard (Content.qml) not found in $QS_CONFIG."
 have systemctl || die "systemd not found (this installer uses a systemd --user service)."
 have curl      || die "curl not found."
 have tar       || die "tar not found."

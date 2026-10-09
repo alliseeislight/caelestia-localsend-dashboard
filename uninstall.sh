@@ -8,8 +8,9 @@
 #
 set -euo pipefail
 
+REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}"
-QS_CONFIG="$CONFIG_HOME/quickshell/caelestia"
+USER_CAELESTIA="$CONFIG_HOME/quickshell/caelestia"
 BIN_DIR="$HOME/.local/bin"
 SYSTEMD_USER_DIR="$CONFIG_HOME/systemd/user"
 CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/localgo"
@@ -25,6 +26,24 @@ fi
 info() { printf '%s\n' "${C}==>${Z} ${B}$*${Z}"; }
 ok()   { printf '%s\n' "${G}  ✓${Z} $*"; }
 warn() { printf '%s\n' "${Y}  !${Z} $*"; }
+
+# shellcheck source=scripts/lib.sh
+source "$REPO_DIR/scripts/lib.sh"
+
+# The installer always wires the widget into the per-user copy of the shell.
+# If it isn't there, look for it wherever it was installed (e.g. an older or
+# manual install), but never edit root-owned system files without permission.
+QS_CONFIG="$USER_CAELESTIA"
+if [ ! -f "$QS_CONFIG/services/LocalSend.qml" ] && [ ! -f "$QS_CONFIG/modules/dashboard/LocalSendTab.qml" ]; then
+    if FOUND="$(caelestia_with_widget)"; then
+        if [ -w "$FOUND" ]; then
+            QS_CONFIG="$FOUND"
+        else
+            warn "The widget appears to be installed system-wide at $FOUND."
+            warn "Re-run this script with sudo to remove it there; skipping those files."
+        fi
+    fi
+fi
 
 # ── 1. receiver service ─────────────────────────────────────────────────────
 info "Removing the receiver service"
@@ -86,3 +105,8 @@ fi
 
 printf '\n%s\n' "${G}${B}Uninstalled.${Z}"
 [ "$PURGE" -eq 1 ] || printf '%s\n' "  (run with ${B}--purge${Z} to also delete the localgo binary and its cached data)"
+if [ -f "$USER_CAELESTIA/.caelestia-localsend-copy" ]; then
+    printf '\n%s\n' "  Note: a personal copy of the shell remains at $USER_CAELESTIA."
+    printf '%s\n' "  It was created so the tab could be added without root, and now shadows"
+    printf '%s\n' "  the packaged shell. Delete that folder to fall back to the packaged copy."
+fi
