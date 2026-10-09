@@ -16,13 +16,14 @@ matches its colours, typography, spacing, radii and animations.
 ## Features
 
 - **Nearby devices** — name, type icon, model/IP and Online/Offline state; select a target by clicking it.
-- **Scan / Refresh** — event-driven by default; a manual scan uses `localgo discover`.
+- **Scan / Refresh** — event-driven by default; a manual scan runs `localgo discover` and *merges* the result with the daemon's device cache (a scan that finds nothing never clears the list).
 - **Send files** — multi-select picker (`zenity`).
 - **Send folder** — sent as a `.zip` (`localgo` compresses it).
 - **Send clipboard** and **Send text** — text can be typed right in the widget.
 - **Incoming transfers** with **Accept / Reject**. Fail-closed: nothing is ever accepted silently.
 - **Live progress** for the outgoing transfer.
 - **Recent history** of received transfers, read straight from `localgo`'s JSONL log.
+- **Your own machine is hidden** — devices whose IP is one of this host's interface addresses (and the daemon's own fingerprint) are filtered out, so you can't accidentally "send to yourself".
 - **Event-driven** incoming updates via the daemon's SSE stream — the listener only runs while the dashboard is open.
 - **Start / stop** the receiver from the widget header.
 

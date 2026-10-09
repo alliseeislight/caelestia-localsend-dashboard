@@ -30,14 +30,53 @@ Singleton {
     readonly property string alias: root.status && root.status.alias ? root.status.alias : root.home.split("/").pop()
     readonly property string downloadDir: root.status && root.status.downloadDir ? root.status.downloadDir : ""
 
-    property var rawDevices: []
+    // Device sources. `cacheDevices` comes from the daemon's passive cache
+    // (/v1/devices); `scanDevices` from an explicit `localgo discover`. They
+    // are merged (never replaced wholesale) so a scan that finds nothing can
+    // no longer wipe a known-good list.
+    property var cacheDevices: []
+    property var scanDevices: []
+
+    // IPv4 addresses belonging to this machine. localgo's own announcement can
+    // carry a *different* fingerprint than /v1/status (e.g. when it goes out
+    // over the docker0 bridge), so the fingerprint check alone leaves us
+    // visible in our own device list. Filtering by local IP always hides us.
+    property var localIps: []
+
     readonly property var devices: {
         const selfFp = root.status ? root.status.fingerprint : "";
-        return root.rawDevices.filter(x => x && (!selfFp || x.fingerprint !== selfFp));
+        const locals = root.localIps;
+        const seen = {};
+        const out = [];
+        const add = d => {
+            if (!d || !d.ip)
+                return;
+            if (selfFp && d.fingerprint === selfFp)
+                return;
+            if (locals.indexOf(d.ip) !== -1)
+                return;
+            const k = `${d.ip}:${d.port}`;
+            if (seen[k])
+                return;
+            seen[k] = true;
+            out.push(d);
+        };
+        // Scan results are the freshest, so take them first.
+        root.scanDevices.forEach(add);
+        root.cacheDevices.forEach(add);
+        return out;
     }
     property var pending: []
     property var history: []
     property bool scanning: false
+
+    // localgo bounds the whole send (discovery + waiting for the receiver to
+    // Accept + upload) with this timeout, defaulting to 30s. That is far too
+    // short: a human accepting on the phone, or a large file over Wi-Fi,
+    // exceeded it and produced "prepare request cancelled: context deadline
+    // exceeded". 10 minutes covers normal accepts and transfers while still
+    // failing in bounded time; unreachable hosts fail fast regardless.
+    readonly property int sendTimeoutSec: 600
 
     // Outgoing transfer state
     property bool sending: false
@@ -70,6 +109,7 @@ Singleton {
         statusIpc.running = true;
         devicesIpc.running = true;
         pendingIpc.running = true;
+        localIpsProc.running = true;
         historyView.reload();
     }
 
@@ -115,7 +155,7 @@ Singleton {
             return;
 
         root.beginSend(target, paths.length === 1 ? paths[0].split("/").pop() : qsTr("%1 items").arg(paths.length));
-        sendProc.command = [root.bin, "send", "--json", "--ip", target].concat(zip ? ["--zip"] : []).concat(paths);
+        sendProc.command = [root.bin, "send", "--json", "--timeout", String(root.sendTimeoutSec), "--ip", target].concat(zip ? ["--zip"] : []).concat(paths);
         sendProc.running = true;
     }
 
@@ -125,7 +165,7 @@ Singleton {
             return;
         }
         root.beginSend(target, qsTr("Clipboard"));
-        sendProc.command = [root.bin, "send", "--json", "--clipboard", "--ip", target];
+        sendProc.command = [root.bin, "send", "--json", "--timeout", String(root.sendTimeoutSec), "--clipboard", "--ip", target];
         sendProc.running = true;
     }
 
@@ -206,6 +246,23 @@ Singleton {
         }
     }
 
+    // A failed outgoing send leaves its error in the transfers card. Clear it
+    // after a while so a stale send error can't be mistaken for the result of
+    // a later incoming transfer.
+    onSendErrorChanged: {
+        if (root.sendError.length > 0)
+            sendErrorClear.restart();
+    }
+
+    Timer {
+        id: sendErrorClear
+        interval: 15000
+        onTriggered: {
+            root.sendError = "";
+            root.sendFailed = false;
+        }
+    }
+
     // ── Live events (server-sent events over the control socket) ─────────────
     // Event-driven instead of polling: the daemon pushes transfer events while
     // the dashboard is open, and the listener is torn down when it closes.
@@ -274,7 +331,7 @@ Singleton {
         endpoint: "/v1/devices"
         handle: d => {
             if (Array.isArray(d))
-                root.rawDevices = d;
+                root.cacheDevices = d;
         }
     }
 
@@ -325,7 +382,7 @@ Singleton {
     Process {
         id: discoverProc
 
-        command: [root.bin, "discover", "--quiet", "--json", "--timeout", "6"]
+        command: [root.bin, "discover", "--quiet", "--json", "--timeout", "8"]
         stdout: StdioCollector {
             id: discoverOut
             waitForEnd: true
@@ -333,23 +390,56 @@ Singleton {
                 // `localgo discover --json` prints human-readable progress
                 // (including spinner/ANSI output) before the JSON document,
                 // so slice from the first opening brace and parse from there.
+                // Never wipe the cached list: discover routinely returns
+                // {"count": 0, "devices": null} when the subnet scan finds
+                // nothing, and clearing on that hid devices the daemon knew.
                 const text = discoverOut.text;
                 const start = text.indexOf("{");
-                if (start < 0)
-                    return;
-                try {
-                    const d = JSON.parse(text.slice(start));
-                    if (Array.isArray(d.devices))
-                        root.rawDevices = d.devices;
-                    else if (typeof d.count === "number" && d.count === 0)
-                        root.rawDevices = [];
-                } catch (e) {
-                    // discovery may print human-readable logs; ignore those
+                let found = [];
+                if (start >= 0) {
+                    try {
+                        const d = JSON.parse(text.slice(start));
+                        if (Array.isArray(d.devices))
+                            found = d.devices;
+                    } catch (e) {
+                        // discovery may print human-readable logs; ignore those
+                    }
                 }
+                root.scanDevices = found;
+                // Pull in whatever the daemon learned meanwhile.
+                devicesIpc.running = true;
+                localIpsProc.running = true;
             }
         }
         onExited: (code, status) => { // qmllint disable signal-handler-parameters
             root.scanning = false;
+        }
+    }
+
+    // --- Local interface addresses (used to hide ourselves) -----------------
+    Process {
+        id: localIpsProc
+
+        command: ["ip", "-j", "-4", "addr", "show"]
+        stdout: StdioCollector {
+            id: localIpsOut
+            waitForEnd: true
+            onStreamFinished: {
+                const ips = [];
+                try {
+                    const ifaces = JSON.parse(localIpsOut.text);
+                    for (const iface of ifaces) {
+                        for (const a of (iface.addr_info || [])) {
+                            if (a.family === "inet" && a.local)
+                                ips.push(a.local);
+                        }
+                    }
+                } catch (e) {
+                    // `ip` missing or non-JSON output: leave the list empty and
+                    // fall back to the fingerprint check.
+                }
+                root.localIps = ips;
+            }
         }
     }
 
@@ -386,7 +476,7 @@ Singleton {
         property string target: ""
         property string payload: ""
 
-        command: ["sh", "-c", `printf %s "$1" | "${root.bin}" send --json --stdin --ip "$2"`, "sh", textProc.payload, textProc.target]
+        command: ["sh", "-c", `printf %s "$1" | "${root.bin}" send --json --timeout ${root.sendTimeoutSec} --stdin --ip "$2"`, "sh", textProc.payload, textProc.target]
         stdout: SplitParser {
             onRead: line => root.handleSendLine(line)
         }
