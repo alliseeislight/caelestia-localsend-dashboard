@@ -70,6 +70,10 @@ Singleton {
     property var history: []
     property bool scanning: false
 
+    // Reactive clock (ms). Lets the "last seen" label age on screen without any
+    // network traffic; it only ticks while the dashboard tab is open.
+    property double nowMs: Date.now()
+
     // localgo bounds the whole send (discovery + waiting for the receiver to
     // Accept + upload) with this timeout, defaulting to 30s. That is far too
     // short: a human accepting on the phone, or a large file over Wi-Fi,
@@ -91,6 +95,46 @@ Singleton {
     // ---------------------------------------------------------------- helpers
     function encodeId(id): string {
         return encodeURIComponent(id ?? "");
+    }
+
+    // ── Device freshness ─────────────────────────────────────────────────────
+    // localgo caches peers for 14 days and only probes them once at startup, so
+    // its `available` flag can stay true long after a device has gone. Prefer
+    // the last time we actually heard from the device.
+    readonly property int onlineWindowMs: 300000 // 5 minutes
+
+    function lastSeenAgeMs(d): double {
+        if (!d || !d.lastSeen)
+            return -1;
+        // localgo timestamps carry nanosecond precision; trim to milliseconds
+        // so every JS engine's Date.parse accepts them.
+        const s = String(d.lastSeen).replace(/(\.\d{3})\d+/, "$1");
+        const t = Date.parse(s);
+        return isNaN(t) ? -1 : (root.nowMs - t);
+    }
+
+    function deviceOnline(d): bool {
+        if (!d || !d.available)
+            return false;
+        const age = root.lastSeenAgeMs(d);
+        return age < 0 || age < root.onlineWindowMs;
+    }
+
+    function deviceStateText(d): string {
+        if (!d)
+            return "";
+        if (!d.available)
+            return qsTr("Offline");
+        const age = root.lastSeenAgeMs(d);
+        if (age < 0 || age < root.onlineWindowMs)
+            return qsTr("Online");
+        const mins = Math.max(1, Math.floor(age / 60000));
+        if (mins < 60)
+            return qsTr("Seen %1m ago").arg(mins);
+        const hrs = Math.floor(mins / 60);
+        if (hrs < 24)
+            return qsTr("Seen %1h ago").arg(hrs);
+        return qsTr("Seen %1d ago").arg(Math.floor(hrs / 24));
     }
 
     function refreshStatus(): void {
@@ -261,6 +305,15 @@ Singleton {
             root.sendError = "";
             root.sendFailed = false;
         }
+    }
+
+    // Keeps the "last seen" labels current while the dashboard is open.
+    Timer {
+        id: clockTimer
+        interval: 30000
+        repeat: true
+        running: root.active
+        onTriggered: root.nowMs = Date.now()
     }
 
     // ── Live events (server-sent events over the control socket) ─────────────

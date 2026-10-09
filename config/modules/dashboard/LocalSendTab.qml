@@ -241,9 +241,9 @@ Item {
                                 }
 
                                 StyledText {
-                                    text: modelData.available ? Tr.tr("Online") : Tr.tr("Offline")
+                                    text: LocalSend.deviceStateText(modelData)
                                     font: Tokens.font.body.small
-                                    color: modelData.available ? Colours.palette.m3primary : Colours.palette.m3onSurfaceVariant
+                                    color: LocalSend.deviceOnline(modelData) ? Colours.palette.m3primary : Colours.palette.m3onSurfaceVariant
                                 }
                             }
 
