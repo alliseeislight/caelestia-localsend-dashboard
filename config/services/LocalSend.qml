@@ -70,6 +70,13 @@ Singleton {
     property var history: []
     property bool scanning: false
 
+    // Targets ("ip:port") whose last send attempt failed to connect, keyed to
+    // the failure timestamp. A refused/timed-out connection is hard evidence
+    // that a cached entry is stale, so it is shown as "Unreachable" for a short
+    // window instead of continuing to claim "Online".
+    property var failedTargets: ({})
+    readonly property int failedWindowMs: 120000
+
     // Reactive clock (ms). Lets the "last seen" label age on screen without any
     // network traffic; it only ticks while the dashboard tab is open.
     property double nowMs: Date.now()
@@ -90,6 +97,12 @@ Singleton {
     property int sendPercent: 0
     property bool sendFailed: false
     property string sendError: ""
+    // Full, untranslated error from localgo/Go. Kept so the "Details" disclosure
+    // and the journal still carry the raw cause after sendError is translated.
+    property string sendErrorDetail: ""
+    // Friendly name of the selected device, captured when the send starts, so a
+    // translated error can name the device instead of the raw ip:port.
+    property string sendTargetName: ""
     property string lastMessage: ""
 
     // ---------------------------------------------------------------- helpers
@@ -116,6 +129,8 @@ Singleton {
     function deviceOnline(d): bool {
         if (!d || !d.available)
             return false;
+        if (root.targetFailed(d))
+            return false;
         const age = root.lastSeenAgeMs(d);
         return age < 0 || age < root.onlineWindowMs;
     }
@@ -125,6 +140,8 @@ Singleton {
             return "";
         if (!d.available)
             return qsTr("Offline");
+        if (root.targetFailed(d))
+            return qsTr("Unreachable");
         const age = root.lastSeenAgeMs(d);
         if (age < 0 || age < root.onlineWindowMs)
             return qsTr("Online");
@@ -135,6 +152,104 @@ Singleton {
         if (hrs < 24)
             return qsTr("Seen %1h ago").arg(hrs);
         return qsTr("Seen %1d ago").arg(Math.floor(hrs / 24));
+    }
+
+    // ── Send error reporting ─────────────────────────────────────────────────
+    // localgo bubbles up raw Go network errors, complete with the request URL.
+    // Translate the common connection failures into something actionable that
+    // names the selected device, and keep the untouched original for the
+    // "Details" disclosure and the journal. Nothing here assumes a platform:
+    // "isn't listening" covers an app the OS has suspended or killed, whether
+    // that is iOS, Android or a desktop that simply isn't running.
+
+    function deviceName(target: string): string {
+        if (!target)
+            return "";
+        for (const d of root.devices) {
+            if (d && `${d.ip}:${d.port}` === target)
+                return d.alias || target;
+        }
+        return target;
+    }
+
+    function markTargetFailed(target: string): void {
+        if (!target)
+            return;
+        const next = Object.assign({}, root.failedTargets);
+        next[target] = Date.now();
+        root.failedTargets = next;
+    }
+
+    function targetFailed(d): bool {
+        if (!d)
+            return false;
+        const t = root.failedTargets[`${d.ip}:${d.port}`];
+        return !!t && (root.nowMs - t) < root.failedWindowMs;
+    }
+
+    function clearTargetFailed(target: string): void {
+        if (!target || !root.failedTargets[target])
+            return;
+        const next = Object.assign({}, root.failedTargets);
+        delete next[target];
+        root.failedTargets = next;
+    }
+
+    // The transport-level failures that mean "we could not even open a socket",
+    // as opposed to the peer actively rejecting an otherwise reachable request.
+    function isConnectFailure(raw: string): bool {
+        const t = String(raw || "").toLowerCase();
+        return t.indexOf("connection refused") !== -1
+            || t.indexOf("i/o timeout") !== -1
+            || t.indexOf("no route to host") !== -1
+            || t.indexOf("network is unreachable") !== -1
+            || t.indexOf("host is unreachable") !== -1;
+    }
+
+    // Strip the noisiest part of a raw Go transport error:
+    //   failed to send prepare request: Post "http://ip:port/api/...": dial tcp ...
+    // becomes
+    //   failed to send prepare request: dial tcp ...
+    // The method + quoted URL is dropped; the localgo phrase and the underlying
+    // dial/HTTP cause are kept so the message is still useful.
+    function trimErrorNoise(raw: string): string {
+        let s = String(raw || "").replace(/\s+/g, " ").trim();
+        s = s.replace(/\x1b\[[0-9;]*m/g, ""); // strip any ANSI colour codes
+        s = s.replace(/\b(?:Post|Get|Put|Patch|Delete|Head|Options)\s+"[a-z][a-z0-9+.-]*:\/\/[^"]*"\s*:\s*/gi, "");
+        s = s.replace(/"[a-z][a-z0-9+.-]*:\/\/[^"]*"\s*:\s*/gi, "");
+        return s.trim();
+    }
+
+    function translateSendError(raw: string): string {
+        const name = root.sendTargetName || root.deviceName(root.sendTarget) || root.sendTarget;
+        const t = String(raw || "").toLowerCase();
+        if (t.indexOf("connection refused") !== -1)
+            return qsTr("%1 isn't listening. Open LocalSend on it and keep it in the foreground, then try again.").arg(name);
+        if (t.indexOf("i/o timeout") !== -1 || t.indexOf("no route to host") !== -1)
+            return qsTr("Couldn't reach %1. Check it's awake, on the same Wi-Fi, and not on a guest or isolated network.").arg(name);
+        const trimmed = root.trimErrorNoise(raw);
+        return trimmed.length > 0 ? trimmed : qsTr("Transfer failed");
+    }
+
+    // Record a failed send: translate it for the UI, keep the raw cause, flag
+    // the target unreachable when the socket never came up, and rescan so the
+    // nearby list stops advertising a device that just refused us.
+    function failSend(raw: string): void {
+        const full = String(raw || "").trim() || qsTr("Transfer failed");
+        root.sendFailed = true;
+        root.sendErrorDetail = full;
+        root.sendError = root.translateSendError(full);
+        console.warn("[LocalSend] send to " + root.sendTarget + " failed: " + full);
+        // Any failure refreshes the cached device list; a failure to even open a
+        // socket additionally flags the target unreachable and triggers a scan
+        // so a stale entry stops being advertised as reachable.
+        root.refreshDevices();
+        if (root.isConnectFailure(full)) {
+            root.markTargetFailed(root.sendTarget);
+            if (root.active)
+                discoverSoonTimer.restart();
+        }
+        sendErrorClear.restart();
     }
 
     function refreshStatus(): void {
@@ -229,8 +344,10 @@ Singleton {
         root.sending = true;
         root.sendFailed = false;
         root.sendError = "";
+        root.sendErrorDetail = "";
         root.sendPercent = 0;
         root.sendTarget = target;
+        root.sendTargetName = root.deviceName(target);
         root.sendLabel = label;
         root.sendFile = "";
         root.lastMessage = "";
@@ -262,18 +379,20 @@ Singleton {
         case "success":
             root.sendPercent = 100;
             root.sendFailed = false;
+            root.clearTargetFailed(root.sendTarget);
             root.lastMessage = qsTr("Sent to %1").arg(root.sendTarget);
             break;
         case "error":
-            root.sendFailed = true;
-            root.sendError = ev.error || qsTr("Transfer failed");
+            root.failSend(ev.error || "");
             break;
         case "pin_required":
             root.sendFailed = true;
+            root.sendErrorDetail = "";
             root.sendError = qsTr("Device requires a PIN");
             break;
         case "transfer_cancelled":
             root.sendFailed = true;
+            root.sendErrorDetail = "";
             root.sendError = qsTr("Cancelled");
             break;
         }
@@ -287,6 +406,7 @@ Singleton {
             eventsProc.running = false;
             eventsTimer.stop();
             pendingSoonTimer.stop();
+            discoverSoonTimer.stop();
         }
     }
 
@@ -340,6 +460,17 @@ Singleton {
         id: pendingSoonTimer
         interval: 150
         onTriggered: pendingIpc.running = true
+    }
+
+    // Coalesces the rescan scheduled after a failed send, so a burst of failed
+    // attempts only triggers one discovery pass.
+    Timer {
+        id: discoverSoonTimer
+        interval: 400
+        onTriggered: {
+            if (root.active && !root.scanning)
+                root.discover();
+        }
     }
 
     // --- IPC queries (one-shot curl against the control socket) -------------
@@ -510,12 +641,11 @@ Singleton {
         onExited: (code, status) => { // qmllint disable signal-handler-parameters
             root.sending = false;
             if (code !== 0) {
-                root.sendFailed = true;
                 const e = sendErr.text.trim();
                 if (e.length > 0)
-                    root.sendError = e;
-                else if (!root.sendError)
-                    root.sendError = qsTr("Transfer failed");
+                    root.failSend(e);
+                else if (!root.sendFailed)
+                    root.failSend("");
             } else if (!root.sendFailed) {
                 root.sendPercent = 100;
             }
@@ -539,12 +669,11 @@ Singleton {
         onExited: (code, status) => { // qmllint disable signal-handler-parameters
             root.sending = false;
             if (code !== 0) {
-                root.sendFailed = true;
                 const e = textErr.text.trim();
                 if (e.length > 0)
-                    root.sendError = e;
-                else if (!root.sendError)
-                    root.sendError = qsTr("Transfer failed");
+                    root.failSend(e);
+                else if (!root.sendFailed)
+                    root.failSend("");
             } else if (!root.sendFailed) {
                 root.sendPercent = 100;
             }

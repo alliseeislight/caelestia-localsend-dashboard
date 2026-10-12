@@ -22,6 +22,8 @@ Item {
     property string target: ""
     // Human-readable name of the selected device, for display only
     property string targetName: ""
+    // Whether the raw localgo/Go error is expanded under the friendly message
+    property bool showSendDetails: false
 
     Component.onCompleted: LocalSend.active = true
     Component.onDestruction: LocalSend.active = false
@@ -460,13 +462,34 @@ Item {
                             }
                         }
 
-                        StyledText {
+                        ColumnLayout {
                             Layout.fillWidth: true
                             visible: LocalSend.sendError.length > 0
-                            wrapMode: Text.WordWrap
-                            text: LocalSend.sendError
-                            font: Tokens.font.body.small
-                            color: Colours.palette.m3error
+                            spacing: Tokens.spacing.extraSmall
+
+                            StyledText {
+                                Layout.fillWidth: true
+                                wrapMode: Text.WordWrap
+                                text: LocalSend.sendError
+                                font: Tokens.font.body.small
+                                color: Colours.palette.m3error
+                            }
+
+                            TextButton {
+                                visible: LocalSend.sendErrorDetail.length > 0 && LocalSend.sendErrorDetail !== LocalSend.sendError
+                                text: root.showSendDetails ? Tr.tr("Hide details") : Tr.tr("Details")
+                                type: TextButton.Text
+                                onClicked: root.showSendDetails = !root.showSendDetails
+                            }
+
+                            StyledText {
+                                Layout.fillWidth: true
+                                visible: root.showSendDetails
+                                wrapMode: Text.WordWrap
+                                text: LocalSend.sendErrorDetail
+                                font: Tokens.font.body.small
+                                color: Colours.palette.m3onSurfaceVariant
+                            }
                         }
                     }
                 }
@@ -566,5 +589,16 @@ Item {
 
         interval: 1500
         onTriggered: LocalSend.refreshAll()
+    }
+
+    // Collapse the raw-error disclosure whenever the friendly message clears
+    // (success, the error card timing out, or a new send starting).
+    Connections {
+        target: LocalSend
+
+        function onSendErrorChanged() {
+            if (LocalSend.sendError.length === 0)
+                root.showSendDetails = false;
+        }
     }
 }
