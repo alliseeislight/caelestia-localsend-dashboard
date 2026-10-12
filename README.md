@@ -133,6 +133,26 @@ does nothing if the file is already patched. (Back up `Content.qml` first!)
 
 ---
 
+## Updating
+
+`install.sh` is idempotent, so it installs *and* updates: re-running it backs up
+the current files with a timestamped `.bak.*` suffix and copies the latest ones
+into place. To update:
+
+```bash
+cd caelestia-localsend-dashboard
+git pull
+./install.sh
+```
+
+Nothing is wiped — an existing `localgo`, the receiver service and the
+already-patched `Content.qml` are reused (and backed up first if they need to
+change), and the shell is reloaded at the end. If you installed by hand, just
+re-copy `config/services/LocalSend.qml` and
+`config/modules/dashboard/LocalSendTab.qml` and reload the shell.
+
+---
+
 ## Usage
 
 1. Open the Caelestia dashboard (the drawer that contains Dashboard / Media / Performance / …).
